@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+
+"""scraper for bugs.python.org
+
+Uses the XML-RPC and CSV interfaces for bugs.python.org to read data
+from the server, store the resulting data in an object, and cache a
+pickled copy.
+
+Usage:
+  scraper <bugs.python.org username> <bugs.python.org password>
+"""
+
+# XXX move IssueCollection into a new module?  Or just have one big
+# script that takes a command name, e.g. bpo scraper <options> and bpo
+# digest <options>.
+
+import os
+import sys
+import codecs
+import csv
+import pickle
+import xmlrpc.client as xmlrpclib
+import requests
+
+# Cache directory
+CACHE_DIR = 'cache'
+
+# URL to get a CSV of all bugs
+CSV_URL= "https://bugs.python.org/issue?@action=export_csv&@columns=title,id,stage,creation,creator,activity,actor,nosy,type,components,versions,dependencies,assignee,keywords,priority,status,resolution,nosy_count,message_count&@sort=id&@startwith=0"
+
+def retrieve_url(filename, url, always_download=False):
+    # Do nothing if file already exists
+    if not always_download and os.path.exists(filename):
+        return
+
+    resp = requests.get(url)
+    if resp:
+        with codecs.open(filename, 'w') as f:
+            f.write(resp.text)
+
+class IssueCollection:
+    def __init__(self):
+        self.users = {}
+        self.issues = {}
+
+def scrape_enums(bpo, ic):
+    for attr, clsname in [
+                          ('components', 'component'),
+                          ('keywords', 'keyword'),
+                          ('priorities', 'priority'),
+                          ('resolutions', 'resolution'),
+                          ('severities', 'severity'),
+                          ('stages', 'stage'),
+                          ('statuses', 'status'),
+                          ('types', 'issue_type'),
+                          ('versions', 'version'),
+                          ]:
+        if getattr(ic, attr, None) is None:
+            d = {}
+            setattr(ic, attr, d)
+
+            for label in bpo.list(clsname):
+                value = bpo.lookup(clsname, label)
+                d[value] = label
+
+def scrape_bugs(bpo, ic):
+    filename = os.path.join(CACHE_DIR, 'issues.csv')
+    retrieve_url(filename, CSV_URL)
+
+    csv_file = csv.DictReader(open(filename, 'r'))
+    for issue in csv_file:
+        ic.issues[issue['id']] = issue
+
+def scrape_users(bpo, ic):
+    if not ic.users:
+        user_list = bpo.list('user')
+        for user in user_list:
+            if user not in ic.users:
+                ic.users[user] = {}
+
+def get_collection():
+    pickle_filename = os.path.join(CACHE_DIR, 'cache.pkl')
+
+    if os.path.exists(pickle_filename):
+        with open(pickle_filename, 'rb') as f:
+            ic = pickle.load(f)
+    else:
+        ic = IssueCollection()
+    return ic
+
+def get_bpo():
+    user = sys.argv[1]
+    password = sys.argv[2]
+    bpo = xmlrpclib.ServerProxy(
+        ('https://%s:%s@bugs.python.org/xmlrpc' % (user, password)),
+         allow_none=True)
+    return bpo
+
+def main():
+    bpo = get_bpo()
+
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+    pickle_filename = os.path.join(CACHE_DIR, 'cache.pkl')
+    ic = get_collection()
+
+    scrape_enums(bpo, ic)
+    scrape_bugs(bpo, ic)
+    scrape_users(bpo, ic)
+
+    with open(pickle_filename, 'wb') as f:
+        pickle.dump(ic, f)
+
+if __name__ == '__main__':
+    main()
