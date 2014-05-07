@@ -2,9 +2,102 @@
   <head>
     <title>Charts: bugs.python.org</title>
     <script type="text/javascript" src="js/jquery-2.1.0.js"></script>
-    <script type="text/javascript" src="js/Chart.js"></script>
+    <script type="text/javascript" src="js/hc/highcharts.js"></script>
+    <script type="text/javascript" src="data/data.js"></script>
+<script type="text/javascript">
+
+var pie_style = {
+        chart: {
+            type: 'pie'
+        },
+        title: {
+            text: 'Untitled'
+        },
+        yAxis: {
+	    title: {
+		text: 'Percentage'
+	    }
+	},
+	plotOptions: {
+	    pie: {
+		shadow: false,
+		center: ['50%', '50%']
+	    }
+	},
+	tooltip: {
+		valueSuffix: '%'
+	},
+    };
+
+function apply_colors(data)
+{
+    var i;
+
+    for(i = 0; i < data.length; i++) {
+        data[i]['color'] = BPO.palette[i];
+    }
+}
+
+function display_charts()
+{
+    var chart;
+
+    chart = $.extend({}, pie_style);
+    apply_colors(BPO.issues_by_status);
+    chart.title.text = 'Issues by Status';
+    chart.series = [{
+	    name: 'Issues',
+	    data: BPO.issues_by_status,
+	    size: '80%',
+	    innerSize: '60%',
+	    dataLabels: {
+		formatter: function() {
+		    return this.point.name;
+		},
+		color: 'black',
+		distance: 10
+            }
+	}];
+    $("#issues-by-status").highcharts(chart);
+
+    chart = $.extend({}, pie_style);
+    apply_colors(BPO.issues_by_type);
+    chart.title.text = 'Issues by Type';
+    chart.series = [{
+	    name: 'Issues',
+	    data: BPO.issues_by_type,
+	    size: '80%',
+	    innerSize: '60%',
+	    dataLabels: {
+		formatter: function() {
+		    return this.point.name;
+		},
+		color: 'black',
+		distance: 10
+            }
+	}];
+    $("#issues-by-type").highcharts(chart);
+}
+
+
+$(display_charts);
+</script>
+
   </head>
   <body>
     <p>Charts</p>
+
+<p>Pie/donut chart of open issues by stage
+
+<div id="issues-by-status" style="width: 300px; height: 300px"></div>
+
+<p>Pie/donut chart of open issues by type
+
+<div id="issues-by-type" style="width: 300px; height: 300px"></div>
+
+<p>Chart of open library issues by module:
+
+<div id="issues-by-module" style="width: 300px; height: 300px"></div>
+
   </body>
 </html>
