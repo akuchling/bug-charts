@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# -*- Python -*-
+
 """scraper for bugs.python.org
 
 Uses the XML-RPC and CSV interfaces for bugs.python.org to read data
@@ -7,26 +9,138 @@ from the server, store the resulting data in an object, and cache a
 pickled copy.
 
 Usage:
-  scraper <bugs.python.org username> <bugs.python.org password>
+  scraper download <bugs.python.org username> <bugs.python.org password>
+    -- download portions of the bug database and cache them
+  scraper summarize
+    -- generate JSON output files summarizing the data.
+  scraper shell
+    -- leaves you at a Python prompt with an 'ic' variable holding issue collection
+
 """
 
-# XXX move IssueCollection into a new module?  Or just have one big
-# script that takes a command name, e.g. bpo scraper <options> and bpo
-# digest <options>.
-
 import os
-import sys
-import codecs
+import io
 import csv
-import pickle
-import xmlrpc.client as xmlrpclib
+import sys
+import json
+import codecs
 import requests
+import operator
+import collections
+import xmlrpc.client as xmlrpclib
 
-# Cache directory
+# Cache directory where we'll pickle the issue data.
 CACHE_DIR = 'cache'
+
+# Directory where the JSON output will be written.
+OUTPUT_DIR = 'output'
 
 # URL to get a CSV of all bugs
 CSV_URL= "https://bugs.python.org/issue?@action=export_csv&@columns=title,id,stage,creation,creator,activity,actor,nosy,type,components,versions,dependencies,assignee,keywords,priority,status,resolution,nosy_count,message_count&@sort=id&@startwith=0"
+
+#
+# Basic collection class and various utility functions.
+#
+
+class IssueCollection:
+    ENUM_LIST = [
+        ('components', 'component'),
+        ('keywords', 'keyword'),
+        ('priorities', 'priority'),
+        ('resolutions', 'resolution'),
+        ('severities', 'severity'),
+        ('stages', 'stage'),
+        ('statuses', 'status'),
+        ('types', 'issue_type'),
+        ('versions', 'version'),
+    ]
+
+    def __init__(self):
+        self.users = {}
+        self.issues = {}
+
+    def scrape_enums(self, bpo):
+        for attr, clsname in self.ENUM_LIST:
+            if getattr(self, attr, None) is None:
+                d = {}
+                setattr(self, attr, d)
+
+                for label in bpo.list(clsname):
+                    value = bpo.lookup(clsname, label)
+                    d[value] = label
+
+    def as_json(self):
+        d = dict(issues=self.issues, users=self.users)
+        for attr, clsname in self.ENUM_LIST:
+            d[attr] = getattr(self, attr)
+        return d
+
+    @classmethod
+    def from_json(cls, json_dict):
+        ic = cls()
+        ic.issues.update(json_dict['issues'])
+        ic.users.update(json_dict['users'])
+        for attr, clsname in self.ENUM_LIST:
+            setattr(ic, attr, json_dict[attr])
+
+    def discard_spam(self):
+        "Discard issues marked as spam, which have a message_count of 0."
+        for k, issue in self.issues.items():
+            if issue['message_count'] == 0:
+                del self.issues[k]
+
+    def guess_modules(self):
+        for issue in self.issues.values():
+            module = ''
+            issue['module'] = module
+
+
+def get_collection():
+    json_filename = os.path.join(CACHE_DIR, 'cache.json')
+    if os.path.exists(json_filename):
+        with open(json_filename, 'rb') as f:
+            d = json.load(f)
+            ic = IssueCollection.from_json(d)
+    else:
+        ic = IssueCollection()
+    return ic
+
+def get_bpo(username=None, password=None):
+    user = sys.argv[1]
+    password = sys.argv[2]
+    if username and password:
+        url = 'https://{}:{}@bugs.python.org/xmlrpc'.format(user, password)
+    else:
+        url = 'https://bugs.python.org/xmlrpc'
+
+    bpo = xmlrpclib.ServerProxy(url, allow_none=True)
+    return bpo
+
+def print_usage():
+    import __main__
+    print(__main__.__doc__, file=sys.stderr)
+    sys.exit(1)
+
+
+#
+# bugs.python.org scraping logic
+#
+
+def download(bpo, ic):
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+    ic.scrape_enums(bpo)
+    download_bugs(bpo, ic)
+    download_users(bpo, ic)
+    ic.discard_spam()
+    ic.guess_modules()
+
+    json_filename = os.path.join(CACHE_DIR, 'cache.json')
+    with open(json_filename, 'wb') as f:
+        d = dict(issues=ic.issues, users=ic.users)
+        json.dump(ic.as_json(), f, indent='  ', sort_keys=True)
+
 
 def retrieve_url(filename, url, always_download=False):
     # Do nothing if file already exists
@@ -38,10 +152,6 @@ def retrieve_url(filename, url, always_download=False):
         with codecs.open(filename, 'w') as f:
             f.write(resp.text)
 
-class IssueCollection:
-    def __init__(self):
-        self.users = {}
-        self.issues = {}
 
 def scrape_enums(bpo, ic):
     for attr, clsname in [
@@ -63,54 +173,118 @@ def scrape_enums(bpo, ic):
                 value = bpo.lookup(clsname, label)
                 d[value] = label
 
-def scrape_bugs(bpo, ic):
+
+def download_bugs(bpo, ic):
     filename = os.path.join(CACHE_DIR, 'issues.csv')
     retrieve_url(filename, CSV_URL)
 
     csv_file = csv.DictReader(open(filename, 'r'))
     for issue in csv_file:
-        ic.issues[issue['id']] = issue
+        # Try to convert fields to numbers
+        for k, v in issue.items():
+            try:
+                v = float(v)
+            except ValueError:
+                pass
+            else:
+                # Store numeric value
+                issue[k] = v
 
-def scrape_users(bpo, ic):
+        ic.issues[int(issue['id'])] = issue
+
+
+def download_users(bpo, ic):
     if not ic.users:
         user_list = bpo.list('user')
         for user in user_list:
             if user not in ic.users:
                 ic.users[user] = {}
 
-def get_collection():
-    pickle_filename = os.path.join(CACHE_DIR, 'cache.pkl')
 
-    if os.path.exists(pickle_filename):
-        with open(pickle_filename, 'rb') as f:
-            ic = pickle.load(f)
-    else:
-        ic = IssueCollection()
-    return ic
 
-def get_bpo():
-    user = sys.argv[1]
-    password = sys.argv[2]
-    bpo = xmlrpclib.ServerProxy(
-        ('https://%s:%s@bugs.python.org/xmlrpc' % (user, password)),
-         allow_none=True)
-    return bpo
+#
+# Summarizing logic
+#
+
+JS_TEMPLATE = """
+// Data for bugs.python.org charts.
+// AUTOGENERATED FILE -- DO NOT EDIT!
+
+var BPO = {{}};
+
+BPO.palette = ["#54ffeb", "#e8d00c", "#ff0000", "#1864e8", "#6bff0d"];
+
+{}
+"""
+
+def summarize(ic):
+    # Analyze the issue data
+    issue_list = list(ic.issues.values())
+
+    # Sort by creation date, oldest first
+    issue_list.sort(key=operator.itemgetter('creation'))
+
+    issues_by_status = collections.Counter()
+    issues_by_type = collections.Counter()
+    issues_by_module = collections.Counter()
+    for issue in issue_list:
+        issues_by_status[issue['status']] += 1
+        issues_by_type[issue['type']] += 1
+        if issue.get('module'):
+            issues_by_module[issue['module']] += 1
+
+    unreviewed_issues = [bug for bug in ic.issues
+                         if bug['message_count'] == '1.0']
+    oldest_unreviewed = unreviewed_issues[:-25]
+
+    # Assemble the JS code to set up the data string.
+    data = []
+    for attr, value in [('issues_by_status', issues_by_status),
+                        ('issues_by_type', issues_by_type),
+                        ('issues_by_module', issues_by_module),
+                        ('oldest_unreviewed', oldest_unreviewed),
+                        ]:
+        data.append('BPO.{} = {};'.format(attr, json.dumps(value)))
+    data_string = '\n'.join(data)
+
+    # Create directory and write the output file.
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+    output = JS_TEMPLATE.format(data_string)
+    with open(os.path.join(OUTPUT_DIR, 'data.js'), 'w') as fh:
+        fh.write(output)
+
 
 def main():
-    bpo = get_bpo()
+    # Parse options and arguments
+    if len(sys.argv) < 1:
+        print_usage()
+        return
 
-    if not os.path.exists(CACHE_DIR):
-        os.makedirs(CACHE_DIR)
+    cmd = sys.argv[1]
+    if cmd not in ('download', 'summarize', 'shell'):
+        print_usage()
+        return
 
-    pickle_filename = os.path.join(CACHE_DIR, 'cache.pkl')
-    ic = get_collection()
+    elif cmd == 'shell':
+        ic = get_collection()
+        print('Use the "ic" variable to explore the collected issues.')
+        # XXX implement this!
 
-    scrape_enums(bpo, ic)
-    scrape_bugs(bpo, ic)
-    scrape_users(bpo, ic)
+    elif cmd == 'download':
+        if len(sys.argv) < 4:
+            print_usage()
+            return
 
-    with open(pickle_filename, 'wb') as f:
-        pickle.dump(ic, f)
+        username = sys.argv[2]
+        password = sys.argv[3]
+        bpo = get_bpo(username, password)
+        ic = get_collection()
+        download(bpo, ic)
+
+    elif cmd == 'summarize':
+        ic = get_collection()
+        summarize(ic)
 
 if __name__ == '__main__':
     main()
